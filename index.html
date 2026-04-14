@@ -7,8 +7,6 @@
 		<link rel="stylesheet" href="./css/Norm_block_model.css" />
 		<link rel="stylesheet" href="./css/style.css" />
 		<title>QR ШК</title>
-	</head>
-	<body>
 		<style>
 			body {
 				font-family: sans-serif;
@@ -27,27 +25,28 @@
 				margin-top: 8px;
 				font-size: 14px;
 				color: #333;
+				word-break: break-all;
 			}
 			#zoomRange {
 				width: 100%;
 			}
+			.zoom-wrap {
+				margin: 8px 0 16px;
+			}
+			.zoom-disabled {
+				opacity: 0.6;
+			}
 		</style>
-
+	</head>
+	<body>
 		<div class="app">
-			<h2>QR → Штрихкод2</h2>
+			<h2>QR → Штрихкод3</h2>
 
 			<div id="reader"></div>
 
-			<div style="margin: 8px 0">
+			<div class="zoom-wrap">
 				<label for="zoomRange">Зум:</label>
-				<input
-					id="zoomRange"
-					type="range"
-					min="1"
-					max="3"
-					step="0.1"
-					value="1"
-				/>
+				<input id="zoomRange" type="range" min="1" max="3" step="0.1" value="1" />
 				<span id="zoomValue">1.0x</span>
 			</div>
 
@@ -55,92 +54,128 @@
 			<div id="barcodeValue"></div>
 		</div>
 
-		<!-- Генератор штрихкода -->
 		<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
-		<!-- QR сканер (низкоуровневый Html5Qrcode, не Html5QrcodeScanner) -->
 		<script src="https://unpkg.com/html5-qrcode@2.3.4/html5-qrcode.min.js"></script>
 
 		<script>
 			function extractBarcode(decodedText) {
-				// ожидаем формат типа: CEN;4607056587934;129.99;1;6;19.02.26
 				const parts = decodedText.split(';');
-				if (parts.length > 1 && /^\d+$/.test(parts[1])) {
-					return parts[1];
-				}
+				if (parts.length > 1 && /^\d+$/.test(parts[1])) return parts[1];
 				return null;
 			}
 
+			const zoomRange = document.getElementById('zoomRange');
+			const zoomValue = document.getElementById('zoomValue');
+			const zoomWrap = document.querySelector('.zoom-wrap');
+			const barcodeValueEl = document.getElementById('barcodeValue');
+
 			let html5QrCode = null;
-			let videoTrack = null;
+			let currentZoom = 1;
+			let scanningStarted = false;
 
 			async function startScanner() {
-				const qrRegionId = 'reader';
-				html5QrCode = new Html5Qrcode(qrRegionId);
+				html5QrCode = new Html5Qrcode('reader');
 
-				// Стартуем сканер с небольшой областью, чтобы «приблизить» код
+				const cameras = await Html5Qrcode.getCameras();
+				if (!cameras || !cameras.length) {
+					zoomRange.disabled = true;
+					zoomValue.textContent = 'нет камеры';
+					zoomWrap.classList.add('zoom-disabled');
+					throw new Error('Камеры не найдены');
+				}
+
+				const backCamera =
+					cameras.find((c) =>
+						/back|rear|environment/i.test(c.label || ''),
+					) || cameras[cameras.length - 1];
+
 				await html5QrCode.start(
-					{ facingMode: 'environment' },
+					{ deviceId: { exact: backCamera.id } },
 					{
 						fps: 15,
-						qrbox: { width: 180, height: 180 }, // меньше, чем 250, даёт больше «зум»
+						qrbox: { width: 180, height: 180 },
 					},
 					onScanSuccess,
 					onScanError,
 				);
 
-				// Получаем доступ к видеотреку для управления зумом
-				const stream = await navigator.mediaDevices.getUserMedia({
-					video: { facingMode: 'environment' },
-				});
-				videoTrack = stream.getVideoTracks()[0];
+				scanningStarted = true;
 
-				setupZoomControl();
+				setTimeout(async () => {
+					await setupZoomControl();
+				}, 800);
 			}
 
-			function setupZoomControl() {
-				const range = document.getElementById('zoomRange');
-				const valueSpan = document.getElementById('zoomValue');
-
-				if (!videoTrack || !videoTrack.getCapabilities) {
-					range.disabled = true;
-					valueSpan.textContent = 'нет зума';
-					return;
-				}
-
-				const capabilities = videoTrack.getCapabilities();
-				if (!capabilities.zoom) {
-					range.disabled = true;
-					valueSpan.textContent = 'нет зума';
-					return;
-				}
-
-				// Настраиваем слайдер под реальные возможности камеры
-				range.min = capabilities.zoom.min;
-				range.max = capabilities.zoom.max;
-				range.step = capabilities.zoom.step || 0.1;
-				range.value = capabilities.zoom.min;
-				valueSpan.textContent = capabilities.zoom.min.toFixed(1) + 'x';
-
-				range.oninput = async () => {
-					const zoomLevel = parseFloat(range.value);
-					valueSpan.textContent = zoomLevel.toFixed(1) + 'x';
-					try {
-						await videoTrack.applyConstraints({
-							advanced: [{ zoom: zoomLevel }],
-						});
-					} catch (e) {
-						console.warn('Не удалось применить зум:', e);
+			async function setupZoomControl() {
+				try {
+					if (!html5QrCode || !html5QrCode.applyVideoConstraints) {
+						disableZoom('нет зума');
+						return;
 					}
-				};
+
+					const cameras = await Html5Qrcode.getCameras();
+					if (!cameras || !cameras.length) {
+						disableZoom('нет зума');
+						return;
+					}
+
+					const trackCapabilities = html5QrCode.getRunningTrackCapabilities
+						? html5QrCode.getRunningTrackCapabilities()
+						: null;
+
+					if (!trackCapabilities || !trackCapabilities.zoom) {
+						disableZoom('нет зума');
+						return;
+					}
+
+					const min = trackCapabilities.zoom.min ?? 1;
+					const max = trackCapabilities.zoom.max ?? 3;
+					const step = trackCapabilities.zoom.step || 0.1;
+					const initial =
+						html5QrCode.getRunningTrackSettings &&
+						html5QrCode.getRunningTrackSettings().zoom
+							? html5QrCode.getRunningTrackSettings().zoom
+							: min;
+
+					zoomRange.min = min;
+					zoomRange.max = max;
+					zoomRange.step = step;
+					zoomRange.value = initial;
+					zoomValue.textContent = Number(initial).toFixed(1) + 'x';
+
+					zoomRange.disabled = false;
+					zoomWrap.classList.remove('zoom-disabled');
+
+					zoomRange.oninput = async () => {
+						const zoomLevel = parseFloat(zoomRange.value);
+						zoomValue.textContent = zoomLevel.toFixed(1) + 'x';
+						currentZoom = zoomLevel;
+
+						try {
+							await html5QrCode.applyVideoConstraints({
+								advanced: [{ zoom: zoomLevel }],
+							});
+						} catch (e) {
+							console.warn('Не удалось применить зум:', e);
+						}
+					};
+				} catch (e) {
+					console.warn(e);
+					disableZoom('нет зума');
+				}
 			}
 
-			function onScanSuccess(decodedText, decodedResult) {
+			function disableZoom(text) {
+				zoomRange.disabled = true;
+				zoomValue.textContent = text;
+				zoomWrap.classList.add('zoom-disabled');
+			}
+
+			function onScanSuccess(decodedText) {
 				const barcodeNumber = extractBarcode(decodedText);
 
 				if (!barcodeNumber) {
-					console.warn('Не удалось вытащить штрихкод из строки:', decodedText);
-					document.getElementById('barcodeValue').textContent =
-						'Ошибка: не найден штрихкод в данных QR';
+					barcodeValueEl.textContent = 'Ошибка: не найден штрихкод в данных QR';
 					return;
 				}
 
@@ -152,14 +187,10 @@
 					displayValue: true,
 				});
 
-				document.getElementById('barcodeValue').textContent = barcodeNumber;
-
-				// Если нужно — можно остановить сканер после первого успешного чтения:
-				// html5QrCode.stop().then(() => html5QrCode.clear());
+				barcodeValueEl.textContent = barcodeNumber;
 			}
 
 			function onScanError(errorMessage) {
-				// игнорируем «нет кода на кадре», остальные выводим
 				if (
 					!/No MultiFormat Readers were able to detect the code/.test(
 						errorMessage,
@@ -170,7 +201,11 @@
 			}
 
 			document.addEventListener('DOMContentLoaded', () => {
-				startScanner().catch(console.error);
+				startScanner().catch((err) => {
+					console.error(err);
+					barcodeValueEl.textContent = 'Ошибка запуска камеры';
+					disableZoom('нет зума');
+				});
 			});
 		</script>
 	</body>
